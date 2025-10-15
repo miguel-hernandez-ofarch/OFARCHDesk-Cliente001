@@ -229,6 +229,15 @@ def main():
     parser.add_argument("--version", default="", help="Version para nombrar artefactos")
     parser.add_argument("--skip-portable-pack", action="store_true", help="Omite empaquetado portable en Windows")
     parser.add_argument("--flutter-dir", default=str(FLUTTER_DIR_DEFAULT), help="Ruta del proyecto Flutter")
+    parser.add_argument("--unix-file-copy-paste",
+                    dest="feat_unix_file_copy_paste",
+                    action="store_true",
+                    help="Activa la feature unix-file-copy-paste en cargo")
+
+    parser.add_argument("--screencapturekit",
+                    dest="feat_screencapturekit",
+                    action="store_true",
+                    help="Activa la feature screencapturekit en cargo")
     args = parser.parse_args()
 
     version = version_value(args.version)
@@ -240,9 +249,18 @@ def main():
         feats.append("hwcodec")
     if args.flutter:
         feats.append("flutter")
+
+    # Auto para macOS, puedes mantenerlo o quitarlo. Duplicados se eliminan más abajo.
     if platform.system() == "Darwin":
         feats += ["unix-file-copy-paste", "screencapturekit"]
 
+    # Flags explícitos del workflow
+    if getattr(args, "feat_unix_file_copy_paste", False):
+        feats.append("unix-file-copy-paste")
+    if getattr(args, "feat_screencapturekit", False):
+        feats.append("screencapturekit")
+
+    # Mezcla con --features manuales si las pasas
     manual_feats = [f.strip() for f in args.features.split(",") if f.strip()]
     all_feats = ",".join(sorted(set(feats + manual_feats)))
 
