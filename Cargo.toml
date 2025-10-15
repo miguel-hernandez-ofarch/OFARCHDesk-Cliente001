@@ -1,11 +1,11 @@
 [package]
-name = "rustdesk"
-version = "1.4.1"
-authors = ["rustdesk <info@rustdesk.com>"]
+name = "OFARCHDesk"
+version = "1.5.0"
+authors = ["OFARCH <soporte@ofarch.co>"]
 edition = "2021"
 build= "build.rs"
-description = "RustDesk Remote Desktop"
-default-run = "rustdesk"
+description = "OFARCH Soporte Remoto"
+default-run = "OFARCHDesk"
 rust-version = "1.75"
 
 [lib]
@@ -27,7 +27,7 @@ use_samplerate = ["samplerate"]
 use_rubato = ["rubato"]
 use_dasp = ["dasp"]
 flutter = ["flutter_rust_bridge"]
-default = ["use_dasp"]
+default = ["use_dasp", "inline"]
 hwcodec = ["scrap/hwcodec"]
 vram = ["scrap/vram"]
 mediacodec = ["scrap/mediacodec"]
@@ -192,10 +192,10 @@ members = ["libs/scrap", "libs/hbb_common", "libs/enigo", "libs/clipboard", "lib
 exclude = ["vdi/host", "examples/custom_plugin"]
 
 [package.metadata.winres]
-LegalCopyright = "Copyright © 2025 Purslane Ltd. All rights reserved."
-ProductName = "RustDesk"
-FileDescription = "RustDesk Remote Desktop"
-OriginalFilename = "rustdesk.exe"
+CompanyName = "OFARCH S.A.S."
+LegalCopyright = "Todos los derechos reservados &copy; OFARCH S.A.S. 2025"
+ProductName = "OFARCHDesk"
+FileDescription = "OFARCH Soporte Remoto"
 
 [target.'cfg(target_os="windows")'.build-dependencies]
 winres = "0.1"
@@ -211,7 +211,7 @@ hound = "3.5"
 docopt = "1.1"
 
 [package.metadata.bundle]
-name = "RustDesk"
+name = "OFARCHDesk"
 identifier = "com.carriez.rustdesk"
 icon = ["res/32x32.png", "res/128x128.png", "res/128x128@2x.png"]
 osx_minimum_system_version = "10.14"

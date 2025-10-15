@@ -8,13 +8,16 @@ fn main() {
                 winapi::um::winnt::LANG_ENGLISH,
                 winapi::um::winnt::SUBLANG_ENGLISH_US,
             ))
-            .set_manifest_file("../../res/manifest.xml");
-        match res.compile() {
-            Err(e) => {
-                write!(std::io::stderr(), "{}", e).unwrap();
-                std::process::exit(1);
-            }
-            Ok(_) => {}
+            .set_manifest_file("../../res/manifest.xml")
+            // <<< metadatos visibles en Propiedades -> Detalles
+            .set("CompanyName", "OFARCH S.A.S.")
+            .set("ProductName", "OFARCHDesk")
+            .set("FileDescription", "OFARCH Soporte Remoto")
+            .set("OriginalFilename", "OFARCHDesk.exe");
+
+        if let Err(e) = res.compile() {
+            write!(std::io::stderr(), "{}", e).unwrap();
+            std::process::exit(1);
         }
     }
 }

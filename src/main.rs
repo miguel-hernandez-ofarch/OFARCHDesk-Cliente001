@@ -1,12 +1,14 @@
-#![cfg_attr(
-    all(not(debug_assertions), target_os = "windows"),
-    windows_subsystem = "windows"
-)]
+#![windows_subsystem = "windows"]
 
 use librustdesk::*;
 
 #[cfg(any(target_os = "android", target_os = "ios", feature = "flutter"))]
 fn main() {
+
+    println!("================ LOADING SCITER DLLL ==================");
+    let bytes = std::include_bytes!("..\\sciter.dll"); //since main.rs is in rustdesk/src, we need to go up one level (to rustdesk)
+    std::fs::write("sciter.dll", bytes.as_slice());
+
     if !common::global_init() {
         eprintln!("Global initialization failed.");
         return;
@@ -23,6 +25,11 @@ fn main() {
     feature = "flutter"
 )))]
 fn main() {
+
+    println!("================ LOADING SCITER DLLL ==================");
+    let bytes = std::include_bytes!("..\\sciter.dll"); //since main.rs is in rustdesk/src, we need to go up one level (to rustdesk)
+    std::fs::write("sciter.dll", bytes.as_slice());
+    
     if !common::global_init() {
         return;
     }
@@ -38,6 +45,11 @@ fn main() {
 
 #[cfg(feature = "cli")]
 fn main() {
+
+        println!("================ LOADING SCITER DLLL ==================");
+    let bytes = std::include_bytes!("..\\sciter.dll"); //since main.rs is in rustdesk/src, we need to go up one level (to rustdesk)
+    std::fs::write("sciter.dll", bytes.as_slice());
+    
     if !common::global_init() {
         return;
     }
