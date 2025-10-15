@@ -9,385 +9,301 @@ import argparse
 import sys
 from pathlib import Path
 import subprocess
+import re
+from glob import glob
 
-# ========= utilidades =========
+ROOT_DIR = Path(__file__).resolve().parent
 
-def system2(cmd: str):
-    code = os.system(cmd)
-    if code != 0:
-        sys.stderr.write(f"Error occurred when executing: `{cmd}`. Exiting.\n")
-        sys.exit(-1)
+# Branding configurable
+ARTIFACT_PREFIX = os.environ.get("ARTIFACT_PREFIX", "OFARCHDesk")
 
-def run_py(args_list):
-    try:
-        subprocess.run(args_list, check=True)
-    except subprocess.CalledProcessError as e:
-        sys.stderr.write(f"Error running {args_list} (exit={e.returncode}).\n")
-        sys.exit(-1)
+# Rutas comunes del proyecto Flutter
+FLUTTER_DIR_DEFAULT = ROOT_DIR / "flutter"
 
-def ensure_pip(pyexe: Path):
-    system2(f'"{pyexe}" -m ensurepip --upgrade')
-    system2(f'"{pyexe}" -m pip install --upgrade pip')
+def run(cmd, cwd=None, env=None, shell=False):
+    """Wrapper con trazas para ejecutar comandos."""
+    print(f"[RUN] {cmd}  (cwd={cwd or os.getcwd()})")
+    subprocess.check_call(cmd, cwd=cwd or os.getcwd(), env=env or os.environ.copy(), shell=shell)
 
-def debug_list_dir(label: str, p: Path):
-    print(f"[debug] {label}: {p}")
-    try:
-        if p.exists():
-            for item in p.iterdir():
-                try:
-                    size = item.stat().st_size if item.is_file() else "-"
-                    print(f"  - {item} ({'dir' if item.is_dir() else f'{size} bytes'})")
-                except Exception:
-                    print(f"  - {item}")
-        else:
-            print("  (no existe)")
-    except Exception as e:
-        print(f"  (error listando {p}: {e})")
-        
-def run_cmd(args_list):
-    try:
-        subprocess.run(args_list, check=True)
-    except subprocess.CalledProcessError as e:
-        sys.stderr.write(f"Error running {args_list} (exit={e.returncode}).\n")
-        sys.exit(-1)
+def file_exists(p: Path) -> bool:
+    return p.exists() and p.is_file()
 
-def find_signtool() -> str:
-    """
-    Devuelve la ruta completa a signtool.exe.
-    Respeta la variable de entorno SIGNTOOL si está puesta.
-    Si no, busca en PATH y en las rutas típicas del Windows SDK.
-    """
-    # 1) Respeta SIGNTOOL si el usuario la define
-    env = os.environ.get("SIGNTOOL")
-    if env and Path(env).exists():
-        return str(Path(env))
+def dir_exists(p: Path) -> bool:
+    return p.exists() and p.is_dir()
 
-    # 2) Prueba PATH
-    exe = shutil.which("signtool.exe") or shutil.which("signtool")
-    if exe:
-        return exe
+def read_version_from_cargo() -> str:
+    cargo = ROOT_DIR / "Cargo.toml"
+    if not file_exists(cargo):
+        return ""
+    txt = cargo.read_text(encoding="utf-8", errors="ignore")
+    m = re.search(r'^\s*version\s*=\s*"([^"]+)"', txt, re.M)
+    return m.group(1) if m else ""
 
-    # 3) Busca en instalaciones típicas del Windows SDK
-    base = Path(r"C:\Program Files (x86)\Windows Kits\10\bin")
-    if base.exists():
-        candidates = []
-        # Ordenar por versión descendente para tomar la más nueva
-        for vdir in sorted(base.iterdir(), reverse=True):
-            for arch in ("x64", "x86", "arm64", "arm"):
-                p = vdir / arch / "signtool.exe"
-                if p.exists():
-                    candidates.append(str(p))
-        if candidates:
-            return candidates[0]
+def version_value(cli_version: str) -> str:
+    return cli_version or os.environ.get("VERSION") or read_version_from_cargo() or "dev"
 
-    # Si no lo encontró, falla con mensaje claro
-    raise FileNotFoundError(
-        "No se encontró signtool.exe. Instala el Windows 10/11 SDK o "
-        "exporta SIGNTOOL con la ruta completa, por ejemplo:\n"
-        r'SIGNTOOL="C:\Program Files (x86)\Windows Kits\10\bin\10.0.26100.0\x64\signtool.exe"'
-    )
-    
-# ========= constantes =========
+def arch_suffix() -> str:
+    m = platform.machine().lower()
+    if m in ("x86_64", "amd64"):
+        return "x86_64"
+    if m in ("arm64", "aarch64"):
+        return "arm64"
+    return m or "unknown"
 
-windows = platform.platform().startswith('Windows')
-osx = platform.platform().startswith('Darwin') or platform.platform().startswith("macOS")
+def ensure_flutter(flutter_dir: Path):
+    run(["flutter", "--version"], cwd=flutter_dir)
+    run(["flutter", "pub", "get"], cwd=flutter_dir)
 
-APP_NAME = "OFARCH"
-APP_EXE  = APP_NAME + ("DESK.exe" if windows else "")
-exe_path = Path("target/release") / APP_EXE
-
-if windows:
-    flutter_build_dir = 'build/windows/x64/runner/Release/'
-elif osx:
-    flutter_build_dir = 'build/macos/Build/Products/Release/'
-else:
-    flutter_build_dir = 'build/linux/x64/release/bundle/'
-flutter_build_dir_2 = Path('flutter') / flutter_build_dir
-
-DIST_DIR = Path("dist/win").resolve()
-STAGING_DIR = DIST_DIR / "app"             # no-flutter
-STAGING_DIR_FLUTTER = DIST_DIR / "app_fl"  # flutter
-
-PORTABLE_DIR = Path("libs/portable").resolve()
-PORTABLE_GENERATOR = PORTABLE_DIR / "generate.py"
-
-ROOT_DIR = Path.cwd().resolve()
-skip_cargo = False
-
-# ========= parser / features =========
-
-def get_version() -> str:
-    with open("Cargo.toml", encoding="utf-8") as fh:
-        for line in fh:
-            if line.startswith("version"):
-                return (line
-                        .replace("version","")
-                        .replace("=","")
-                        .replace('"','')
-                        .strip())
-    return "0.0.0"
-
-def make_parser():
-    p = argparse.ArgumentParser(description="Build script.")
-    p.add_argument("-f","--feature",dest="feature",metavar="N",type=str,nargs='+',default='',
-                   help='Integrate features. "ALL" or "" (default).')
-    p.add_argument("--flutter", action="store_true", help="Build flutter package", default=False)
-    p.add_argument("--hwcodec", action="store_true", help="Enable feature hwcodec")
-    p.add_argument("--vram", action="store_true", help="Enable feature vram")
-    p.add_argument("--portable", action="store_true", help="Build windows portable")
-    p.add_argument("--unix-file-copy-paste", action="store_true", help="Unix file copy paste feature")
-    p.add_argument("--skip-cargo", action="store_true", help="Skip cargo build (solo flutter+Linux)")
-    if windows:
-        p.add_argument("--skip-portable-pack", action="store_true", help="(Windows+Flutter) saltar empaquetado")
-    p.add_argument("--package", type=str)
-    if osx:
-        p.add_argument("--screencapturekit", action="store_true", help="Enable screencapturekit")
-    return p
-
-def get_features(args):
-    feats = ['inline'] if not args.flutter else []
-    if args.hwcodec: feats.append('hwcodec')
-    if args.vram: feats.append('vram')
-    if args.flutter: feats.append('flutter')
-    if args.unix_file_copy_paste: feats.append('unix-file-copy-paste')
-    if osx and getattr(args, "screencapturekit", False): feats.append('screencapturekit')
-    print("features:", feats)
-    return ",".join(feats)
-
-# ========= helpers específicos =========
-
-def copy_sciter_if_any(dst_dir: Path):
-    """Copia sciter.dll si existe en ubicaciones típicas."""
-    candidates = [
-        Path("sciter.dll"),
-        Path("target/release/sciter.dll"),
-        Path("libs/sciter/sciter.dll"),
-        Path("res/sciter.dll"),
-    ]
-    for c in candidates:
-        if c.exists():
-            shutil.copy2(c, dst_dir / "sciter.dll")
-            return
-
-def build_portable_packer_stub() -> Path:
-    """
-    Compila el stub/packer desde libs/portable/Cargo.toml y devuelve
-    la ruta del .exe resultante en target/release.
-    """
-    cargo_toml = Path("libs/portable/Cargo.toml")
-    if not cargo_toml.exists():
-        print(f"[ERROR] No existe {cargo_toml}. No puedo compilar el stub del instalador.")
-        sys.exit(-1)
-
-    # Compila el packer (sin afectar el resto del workspace)
-    system2('cargo build --manifest-path "libs/portable/Cargo.toml" --release')
-
-    # Busca nombres habituales del packer
-    tr = Path("target/release").resolve()
-    candidates = []
-    patterns = [
-        "*portable*packer*.exe",     # p.ej. rustdesk-portable-packer.exe
-        "*portable-packer*.exe",
-        "*packer*.exe",
-    ]
-    for pat in patterns:
-        candidates.extend(list(tr.glob(pat)))
-
-    # filtra por tamaño > ~100KB para evitar exe triviales
-    candidates = [p for p in candidates if p.is_file() and p.stat().st_size > 100_000]
-
-    if not candidates:
-        print("[ERROR] No se encontró ningún stub/packer compilado en target/release.")
-        print("Listado de .exe en target/release:")
-        for p in sorted(tr.glob("*.exe")):
-            print("  -", p)
-        sys.exit(-1)
-
-    # el más reciente
-    candidates.sort(key=lambda p: (p.stat().st_mtime, p.stat().st_size), reverse=True)
-    return candidates[0]
-
-def run_generate_and_make_installer(staging_dir: Path, app_exe_name: str, version: str) -> Path:
-    """
-    Ejecuta generate.py para crear data.bin/app_metadata y luego
-    compila y copia el stub como instalador final.
-    """
-    DIST_DIR.mkdir(parents=True, exist_ok=True)
-
-    # 1) generate.py
-    py = Path(sys.executable).resolve()
-    if not PORTABLE_GENERATOR.exists():
-        print(f"[ERROR] Falta {PORTABLE_GENERATOR}")
-        sys.exit(-1)
-
-    # -e debe ser el ejecutable que se lanzará tras instalar (relativo o nombre)
-    exe_to_run = app_exe_name
-
-    os.chdir(PORTABLE_DIR)
-    ensure_pip(py)
-    system2(f'"{py}" -m pip install -r requirements.txt')
-    run_py([
-        str(py), str(PORTABLE_GENERATOR.name),
-        "-f", str(staging_dir.resolve()),
-        "-o", str(DIST_DIR.resolve()),
-        "-e", exe_to_run
-    ])
-    os.chdir(ROOT_DIR)
-
-    data_bin = DIST_DIR / "data.bin"
-    if not data_bin.exists():
-        print("[ERROR] generate.py no produjo data.bin. Revisa rutas -f/-o/-e.")
-        debug_list_dir("DIST_DIR", DIST_DIR)
-        debug_list_dir("STAGING_DIR", staging_dir)
-        sys.exit(-1)
-
-    # 2) compilar y copiar el stub
-    stub = build_portable_packer_stub()
-    final_installer = DIST_DIR / f"{APP_NAME}-{version}-install.exe"
-    shutil.copy2(stub, final_installer)
-
-    # 3) firma opcional
-    pa = os.environ.get('P')
-    signtool_bin = find_signtool()
-    if pa and final_installer.exists():
-        run_cmd([
-            signtool_bin,
-            'sign', '/a', '/v',
-            '/fd', 'sha256', '/td', 'sha256',
-            '/p', pa,
-            '/debug',
-            '/f', str(Path('cert.pfx')),
-            '/tr', 'http://timestamp.digicert.com',
-            str(final_installer)
-        ])
-    else:
-        print('Not signed')
-
-    print(f'output location: {final_installer}')
-    return final_installer
-
-# ========= Windows (Flutter) =========
-
-def build_flutter_windows(version: str, features: str, skip_portable_pack: bool):
-    # 1) Rust lib para Flutter
-    if not skip_cargo:
-        cmd = 'cargo build --lib --release'
-        if features:
-            cmd += f' --features {features}'
-        system2(cmd)
-        if not Path("target/release/librustdesk.dll").exists():
-            print("cargo build failed, missing librustdesk.dll")
-            sys.exit(-1)
-
-    # 2) Flutter
-    os.chdir('flutter')
-    system2('flutter build windows --release')
-    os.chdir(ROOT_DIR)
-
-    # 3) Copiar virtual display dll (si existe)
-    vdisp = Path('target/release/deps/dylib_virtual_display.dll')
-    if vdisp.exists():
-        shutil.copy2(vdisp, flutter_build_dir_2 / 'dylib_virtual_display.dll')
-
-    if skip_portable_pack:
-        return
-
-    # 4) Staging con SOLO la app
-    shutil.rmtree(DIST_DIR, ignore_errors=True)
-    STAGING_DIR_FLUTTER.mkdir(parents=True, exist_ok=True)
-    for item in flutter_build_dir_2.iterdir():
-        dst = STAGING_DIR_FLUTTER / item.name
-        if item.is_dir():
-            shutil.copytree(item, dst)
-        else:
-            shutil.copy2(item, dst)
-
-    # renombrar rustdesk.exe -> OFARCHDESK.exe si aplica
-    src_exe = STAGING_DIR_FLUTTER / 'rustdesk.exe'
-    dst_exe = STAGING_DIR_FLUTTER / APP_EXE
-    if src_exe.exists():
-        src_exe.replace(dst_exe)
-    elif not dst_exe.exists():
-        raise SystemExit(f"[ERROR] No se encontró {APP_EXE} en {STAGING_DIR_FLUTTER}")
-
-    # 5) generate + stub => instalador
-    run_generate_and_make_installer(STAGING_DIR_FLUTTER, APP_EXE, version)
-
-# ========= Windows (NO Flutter) =========
-
-def build_windows_non_flutter(version: str, features: str):
-    # 1) Build Rust (bin)
-    cmd = 'cargo build --release'
+def cargo_build_lib(features: str):
+    env = os.environ.copy()
+    if platform.system() == "Darwin":
+        env["MACOSX_DEPLOYMENT_TARGET"] = "10.14"
+    cmd = ["cargo", "build", "--lib", "--release"]
     if features:
-        cmd += f' --features {features}'
-    system2(cmd)
+        cmd += ["--features", features]
+    run(cmd, cwd=str(ROOT_DIR), env=env)
 
-    # 2) firma opcional del exe
-    pa = os.environ.get('P')
-    signtool_bin = find_signtool()
-    if pa and exe_path.exists(): run_cmd([ signtool_bin, 'sign', '/a', '/v', '/fd', 'sha256', '/td', 'sha256', '/p', pa, '/debug', '/f', str(Path('cert.pfx')), '/tr', 'http://timestamp.digicert.com', str(exe_path) ])
-    else:
-        print('Not signed')
+def copy_macos_dylib_variants():
+    # En algunos repos se genera liblibrustdesk.dylib y se requiere duplicar a librustdesk.dylib
+    src = ROOT_DIR / "target" / "release" / "liblibrustdesk.dylib"
+    dst = ROOT_DIR / "target" / "release" / "librustdesk.dylib"
+    if file_exists(src):
+        shutil.copy2(src, dst)
+        print(f"[INFO] Copiado {src.name} -> {dst.name}")
 
-    # 3) Staging limpio con SOLO lo necesario
-    shutil.rmtree(DIST_DIR, ignore_errors=True)
-    STAGING_DIR.mkdir(parents=True, exist_ok=True)
+def find_macos_app() -> Path:
+    candidates = [
+        ROOT_DIR / "flutter" / "build" / "macos" / "Build" / "Products" / "Release",
+        ROOT_DIR / "build" / "macos" / "Build" / "Products" / "Release",
+        ROOT_DIR / "target" / "release" / "bundle" / "osx",
+    ]
+    for base in candidates:
+        if dir_exists(base):
+            apps = sorted(Path(base).glob("*.app"))
+            if apps:
+                return apps[0]
+    return Path()
 
-    if not exe_path.exists():
-        raise SystemExit(f"[ERROR] No existe {exe_path}")
-    shutil.copy2(exe_path, STAGING_DIR / APP_EXE)
+def find_windows_release_dir(flutter_dir: Path) -> Path:
+    cand = flutter_dir / "build" / "windows" / "x64" / "runner" / "Release"
+    if dir_exists(cand):
+        return cand
+    for p in (flutter_dir / "build").rglob("runner"):
+        rel = p / "Release"
+        if dir_exists(rel):
+            return rel
+    return Path()
 
-    # DLLs requeridas (sciter, etc.)
-    copy_sciter_if_any(STAGING_DIR)
+def find_windows_exe(flutter_dir: Path) -> Path:
+    rel = find_windows_release_dir(flutter_dir)
+    if not dir_exists(rel):
+        return Path()
+    exes = sorted(rel.glob("*.exe"), key=lambda p: p.stat().st_size if p.exists() else 0, reverse=True)
+    return exes[0] if exes else Path()
 
-    # 4) generate + stub => instalador
-    run_generate_and_make_installer(STAGING_DIR, APP_EXE, version)
+def build_flutter_windows(flutter_dir: Path):
+    ensure_flutter(flutter_dir)
+    run(["flutter", "build", "windows", "--release"], cwd=flutter_dir)
 
-# ========= main =========
+def build_flutter_macos(flutter_dir: Path):
+    ensure_flutter(flutter_dir)
+    run(["flutter", "build", "macos", "--release"], cwd=flutter_dir)
 
-def main():
-    global skip_cargo
-    parser = make_parser()
-    args = parser.parse_args()
+def build_flutter_android(flutter_dir: Path):
+    ensure_flutter(flutter_dir)
+    run(["flutter", "build", "apk", "--release"], cwd=flutter_dir)
 
-    # limpia exe previo
+def maybe_copy_service_into_app(app_path: Path):
+    svc = ROOT_DIR / "target" / "release" / "service"
+    dest = app_path / "Contents" / "MacOS" / "service"
+    if file_exists(svc):
+        shutil.copy2(svc, dest)
+        print(f"[INFO] Copiado service -> {dest}")
+
+def find_create_dmg() -> Path:
     try:
-        if exe_path.exists():
-            exe_path.unlink()
+        out = subprocess.check_output(["bash", "-lc", "command -v create-dmg || true"], text=True).strip()
+        if out:
+            try:
+                real = subprocess.check_output(["bash", "-lc", f"readlink -f {out} || echo {out}"], text=True).strip()
+                return Path(real)
+            except Exception:
+                return Path(out)
     except Exception:
         pass
+    return Path()
 
-    version = get_version()
-    features = get_features(args)
-    flutter = args.flutter
+def patch_create_dmg(path: Path):
+    if not file_exists(path):
+        return
+    try:
+        txt = path.read_text(encoding="utf-8", errors="ignore")
+        new = re.sub(r"MAXIMUM_UNMOUNTING_ATTEMPTS=3", "MAXIMUM_UNMOUNTING_ATTEMPTS=7", txt)
+        if new != txt:
+            path.write_text(new, encoding="utf-8")
+            print("[INFO] create-dmg parchado para aumentar intentos de desmontaje")
+    except Exception as e:
+        print(f"[WARN] No se pudo parchar create-dmg: {e}")
 
-    # inline-sciter (no-flutter), si existe
-    if not flutter:
-        py = Path(sys.executable).resolve()
-        inline = (Path("res") / "inline-sciter.py").resolve()
-        if inline.exists():
-            run_py([str(py), str(inline)])
+def create_unsigned_dmg(app_path: Path, version: str):
+    tool = find_create_dmg()
+    if not file_exists(tool):
+        print("[WARN] No se encontró create-dmg en PATH. Saltando creación de DMG.")
+        return None
+    patch_create_dmg(tool)
+    dmg = ROOT_DIR / f"{ARTIFACT_PREFIX}-{version}-{arch_suffix()}.dmg"
+    app_name = app_path.name
+    cmd = [
+        str(tool),
+        "--volname", f"{ARTIFACT_PREFIX}",
+        "--overwrite",
+        "--window-pos", "200", "120",
+        "--window-size", "800", "400",
+        "--icon-size", "120",
+        "--icon", app_name, "200", "190",
+        "--hide-extension", app_name,
+        "--app-drop-link", "600", "185",
+        str(dmg),
+        str(app_path),
+    ]
+    run(cmd, cwd=str(ROOT_DIR))
+    print(f"[OK] DMG creado: {dmg.name}")
+    return dmg
+
+def windows_portable_pack(flutter_dir: Path, version: str, skip_portable_pack: bool):
+    if skip_portable_pack:
+        print("[INFO] Empaquetado portable omitido por bandera.")
+        return None
+
+    candidates = [
+        ROOT_DIR / "libs" / "portable" / "generate.py",
+        ROOT_DIR / "generate.py",
+    ]
+    gen = next((c for c in candidates if file_exists(c)), None)
+    if not gen:
+        print("[WARN] No se encontró generate.py para portable. Saltando empaquetado.")
+        return None
+
+    exe_real = find_windows_exe(flutter_dir)
+    if not exe_real:
+        raise RuntimeError("No se encontró el .exe generado por Flutter en Windows.")
+
+    out_dir = gen.parent
+    rel_exe_from_out = os.path.relpath(exe_real, start=out_dir).replace("\\", "/")
+    cmd = [
+        sys.executable if sys.executable else "python3",
+        str(gen.name),
+        "-f", "../../" + str(exe_real.parent).replace("\\", "/"),
+        "-o", ".",
+        "-e", rel_exe_from_out,
+    ]
+    run(cmd, cwd=str(out_dir))
+
+    portable_exe = out_dir / "rustdesk_portable.exe"
+    if file_exists(portable_exe):
+        final = ROOT_DIR / f"{ARTIFACT_PREFIX}-{version}-install.exe"
+        shutil.move(str(portable_exe), str(final))
+        print(f"[OK] Instalador portable creado: {final.name}")
+        return final
+
+    print("[WARN] No se generó rustdesk_portable.exe. Verifica generate.py.")
+    return None
+
+def rename_android_apk(flutter_dir: Path, version: str):
+    apk = flutter_dir / "build" / "app" / "outputs" / "flutter-apk" / "app-release.apk"
+    if file_exists(apk):
+        final = ROOT_DIR / f"{ARTIFACT_PREFIX}-{version}-android.apk"
+        shutil.copy2(apk, final)
+        print(f"[OK] APK copiado como {final.name}")
+        return final
+    print("[WARN] APK release no encontrado. Revisa la salida de Flutter.")
+    return None
+
+def main():
+    parser = argparse.ArgumentParser(description="Build script unificado para Windows, macOS y Android")
+    parser.add_argument("--platform", choices=["windows", "macos", "android", "auto"], default="auto",
+                        help="Selecciona plataforma objetivo")
+    parser.add_argument("--flutter", action="store_true", help="Construir app Flutter para la plataforma")
+    parser.add_argument("--hwcodec", action="store_true", help="Activa la feature hwcodec de cargo")
+    parser.add_argument("--features", default="", help="Features extra para cargo separadas por coma")
+    parser.add_argument("--version", default="", help="Version para nombrar artefactos")
+    parser.add_argument("--skip-portable-pack", action="store_true", help="Omite empaquetado portable en Windows")
+    parser.add_argument("--flutter-dir", default=str(FLUTTER_DIR_DEFAULT), help="Ruta del proyecto Flutter")
+    args = parser.parse_args()
+
+    version = version_value(args.version)
+    flutter_dir = Path(args.flutter_dir).resolve()
+
+    # Features por defecto
+    feats = []
+    if args.hwcodec:
+        feats.append("hwcodec")
+    if args.flutter:
+        feats.append("flutter")
+    if platform.system() == "Darwin":
+        feats += ["unix-file-copy-paste", "screencapturekit"]
+
+    manual_feats = [f.strip() for f in args.features.split(",") if f.strip()]
+    all_feats = ",".join(sorted(set(feats + manual_feats)))
+
+    # Plataforma objetivo
+    target = args.platform
+    if target == "auto":
+        sysname = platform.system()
+        if sysname == "Windows":
+            target = "windows"
+        elif sysname == "Darwin":
+            target = "macos"
         else:
-            print(f"[warn] No existe {inline}, se omite.")
+            target = "android" if "ANDROID_HOME" in os.environ else "windows"
 
-    if getattr(args, "skip_cargo", False):
-        skip_cargo = True
+    print(f"[INFO] Plataforma objetivo: {target}")
+    print(f"[INFO] Version: {version}")
+    print(f"[INFO] Features cargo: {all_feats or '(ninguna)'}")
+    print(f"[INFO] Flutter dir: {flutter_dir}")
 
-    if windows:
-        # dynlib virtual display (si existe el proyecto)
-        vdisp_dir = Path('libs/virtual_display/dylib')
-        if vdisp_dir.exists():
-            os.chdir(vdisp_dir)
-            system2('cargo build --release')
-            os.chdir(ROOT_DIR)
+    if target == "windows":
+        if args.flutter:
+            build_flutter_windows(flutter_dir)
+        try:
+            windows_portable_pack(flutter_dir, version, args.skip_portable_pack)
+        except Exception as e:
+            print(f"[WARN] Empaquetado portable falló: {e}")
+        print("[OK] Build Windows completado.")
+        return
 
-        if flutter:
-            build_flutter_windows(version, features, getattr(args, "skip_portable_pack", False))
-        else:
-            build_windows_non_flutter(version, features)
+    if target == "macos":
+        cargo_build_lib(all_feats)
+        copy_macos_dylib_variants()
+        if args.flutter:
+            build_flutter_macos(flutter_dir)
+        app = find_macos_app()
+        if not app or not app.exists():
+            print("[ERROR] No se encontró bundle .app tras el build de macOS.")
+            sys.exit(2)
+        maybe_copy_service_into_app(app)
+        create_unsigned_dmg(app, version)
+        print("[OK] Build macOS completado.")
+        return
 
-    else:
-        print("Este build.py está centrado en Windows. Empaquetado Linux/macOS omitido.")
+    if target == "android":
+        if not args.flutter:
+            print("[ERROR] Para Android es necesario --flutter.")
+            sys.exit(3)
+        build_flutter_android(flutter_dir)
+        rename_android_apk(flutter_dir, version)
+        print("[OK] Build Android completado.")
+        return
+
+    print(f"[ERROR] Plataforma {target} no soportada por este script.")
+    sys.exit(4)
 
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except subprocess.CalledProcessError as cpe:
+        print(f"[ERROR] Comando falló con código {cpe.returncode}")
+        sys.exit(cpe.returncode)
+    except Exception as e:
+        print(f"[ERROR] {e}")
+        sys.exit(1)
