@@ -702,45 +702,79 @@ jobs:
           fi
           ./build.py --flutter --hwcodec --unix-file-copy-paste ${{ matrix.job.extra-build-args }}
 
+      - name: Resolve .app bundle path
+        id: bundle
+        shell: bash
+        run: |
+          set -euxo pipefail
+          APP_BUNDLE="$(ls -d ./flutter/build/macos/Build/Products/Release/*.app 2>/dev/null || true)"
+          if [ -z "$APP_BUNDLE" ]; then
+            APP_BUNDLE="$(ls -d ./build/macos/Build/Products/Release/*.app 2>/dev/null || true)"
+          fi
+          if [ -z "$APP_BUNDLE" ]; then
+            echo "No se encontró ningún .app en Release. Revisa el build de Flutter o build.py." >&2
+            exit 1
+          fi
+          echo "app_bundle=$APP_BUNDLE" >> "$GITHUB_OUTPUT"
+          echo "app_name=$(basename "$APP_BUNDLE")" >> "$GITHUB_OUTPUT"
+
       - name: create unsigned dmg
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
           CREATE_DMG="$(command -v create-dmg)"
           CREATE_DMG="$(readlink -f "$CREATE_DMG")"
           sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
-          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
+          APP="${{ steps.bundle.outputs.app_bundle }}"
+          APP_NAME="${{ steps.bundle.outputs.app_name }}"
+          create-dmg --icon "$APP_NAME" 200 190 --hide-extension "$APP_NAME" --window-size 800 400 --app-drop-link 600 185 "OFARCHDesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg" "$APP"
+
 
       - name: Upload unsigned macOS app
         if: env.UPLOAD_ARTIFACT == 'true'
         uses: actions/upload-artifact@master
         with:
-          name: rustdesk-unsigned-macos-${{ matrix.job.arch }}
-          path: rustdesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg # can not upload the directory directly or tar.gz, which destroy the link structure, causing the codesign failed
+          name: OFARCHDesk-unsigned-macos-${{ matrix.job.arch }}
+          path: OFARCHDesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg # can not upload the directory directly or tar.gz, which destroy the link structure, causing the codesign failed
 
       - name: Codesign app and create signed dmg
         if: env.MACOS_P12_BASE64 != null && env.UPLOAD_ARTIFACT == 'true'
         run: |
-          # Patch create-dmg to give more attempts to unmount image
+          # Opcional: modo estricto
+          set -euxo pipefail
+
+          # Patch create-dmg para más intentos de desmontaje
           CREATE_DMG="$(command -v create-dmg)"
-          CREATE_DMG="$(readlink -f "$CREATE_DMG")"
-          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG"
-          # Unlock keychain
+          CREATE_DMG="$(readlink -f "$CREATE_DMG")" || true
+          sed -i -e 's/MAXIMUM_UNMOUNTING_ATTEMPTS=3/MAXIMUM_UNMOUNTING_ATTEMPTS=7/' "$CREATE_DMG" || true
+
+          # Desbloquear keychain
           security default-keychain -s rustdesk.keychain
           security unlock-keychain -p ${{ secrets.MACOS_P12_PASSWORD }} rustdesk.keychain
-          # start sign the rustdesk.app and dmg
-          rm -rf *.dmg || true
-          codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --deep --strict ./flutter/build/macos/Build/Products/Release/RustDesk.app -vvv
-          create-dmg --icon "RustDesk.app" 200 190 --hide-extension "RustDesk.app" --window-size 800 400 --app-drop-link 600 185 rustdesk-${{ env.VERSION }}.dmg ./flutter/build/macos/Build/Products/Release/RustDesk.app
-          codesign --force --options runtime -s ${{ secrets.MACOS_CODESIGN_IDENTITY }} --deep --strict rustdesk-${{ env.VERSION }}.dmg -vvv
-          # notarize the rustdesk-${{ env.VERSION }}.dmg
-          rcodesign notary-submit --api-key-path ${{ github.workspace }}/rustdesk.json  --staple rustdesk-${{ env.VERSION }}.dmg
 
-      - name: Rename rustdesk
+          # Variables resueltas del bundle
+          APP="${{ steps.bundle.outputs.app_bundle }}"
+          APP_NAME="${{ steps.bundle.outputs.app_name }}"
+
+          # Limpiar DMGs previos
+          rm -rf *.dmg || true
+
+          # Firmar la app
+          codesign --force --options runtime -s "${{ secrets.MACOS_CODESIGN_IDENTITY }}" --deep --strict "$APP" -vvv
+
+          # Crear y firmar el DMG con nombre OFARCHDesk
+          create-dmg --icon "$APP_NAME" 200 190 --hide-extension "$APP_NAME" --window-size 800 400 --app-drop-link 600 185 "OFARCHDesk-${{ env.VERSION }}.dmg" "$APP"
+          codesign --force --options runtime -s "${{ secrets.MACOS_CODESIGN_IDENTITY }}" --deep --strict "OFARCHDesk-${{ env.VERSION }}.dmg" -vvv
+
+          # Notarizar el DMG
+          rcodesign notary-submit --api-key-path "${{ github.workspace }}/rustdesk.json" --staple "OFARCHDesk-${{ env.VERSION }}.dmg"
+
+      - name: Rename OFARCHDesk signed DMG to include arch
         if: env.UPLOAD_ARTIFACT == 'true'
         run: |
-          for name in rustdesk*??.dmg; do
-              mv "$name" "${name%%.dmg}-${{ matrix.job.arch }}.dmg"
-          done
+          if [ -f "OFARCHDesk-${{ env.VERSION }}.dmg" ]; then
+            mv "OFARCHDesk-${{ env.VERSION }}.dmg" "OFARCHDesk-${{ env.VERSION }}-${{ matrix.job.arch }}.dmg"
+          fi
+
 
       - name: Publish DMG package
         if: env.UPLOAD_ARTIFACT == 'true'
@@ -749,7 +783,7 @@ jobs:
           prerelease: true
           tag_name: ${{ env.TAG_NAME }}
           files: |
-            rustdesk*-${{ matrix.job.arch }}.dmg
+            OFARCHDesk*-${{ matrix.job.arch }}.dmg
 
   publish_unsigned:
     needs:
