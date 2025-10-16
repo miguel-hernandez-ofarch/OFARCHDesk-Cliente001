@@ -702,10 +702,10 @@ jobs:
         working-directory: ./flutter
         run: |
           set -euxo pipefail
-          # Asegura deps Dart
+          # deps de Dart/Flutter
           flutter pub get
 
-          # 1) Elegir archivo Rust para desktop, evitando Android
+          # Elegir archivo Rust para desktop, evitando Android
           RUST_INPUT="$(git -C .. ls-files \
             'src/**/macos/**/ffi*.rs' \
             'libs/**/src/**/macos/**/ffi*.rs' \
@@ -717,27 +717,30 @@ jobs:
             'libs/**/src/**/bridge*.rs' \
             | grep -v '/android/' | head -n 1 || true)"
           if [ -z "$RUST_INPUT" ]; then
-            echo "No se encontró archivo Rust de entrada para FRB distinto a Android" >&2
+            echo "No se encontró archivo Rust de entrada para FRB (no Android)" >&2
             exit 1
           fi
           echo "Usando RUST_INPUT=$RUST_INPUT"
 
-          # 2) Instalar la CLI de FRB vía cargo (preferida), con fallback a dart global
+          # Instala la CLI de FRB (preferible vía cargo), y usa 'generate'
           cargo install flutter_rust_bridge_codegen --locked || true
           if command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
-            flutter_rust_bridge_codegen \
-              --rust-input "../$RUST_INPUT" \
-              --dart-output "lib/frb_generated.dart" \
-              --rust-output "../src/frb_generated.rs"
+            flutter_rust_bridge_codegen generate \
+              -r "../$RUST_INPUT" \
+              -d "lib" \
+              --rust-output "../src/frb_generated.rs" \
+              --no-web
           else
+            # Fallback por si no quedó en PATH (opcional)
             dart pub global activate flutter_rust_bridge_codegen
-            dart pub global run flutter_rust_bridge_codegen \
-              --rust-input "../$RUST_INPUT" \
-              --dart-output "lib/frb_generated.dart" \
-              --rust-output "../src/frb_generated.rs"
+            dart pub global run flutter_rust_bridge_codegen generate \
+              -r "../$RUST_INPUT" \
+              -d "lib" \
+              --rust-output "../src/frb_generated.rs" \
+              --no-web
           fi
 
-          # 3) Verificación: debe existir el archivo Dart que reexporta el shim
+          # Verificación: el generador escribe lib/frb_generated.dart
           test -f lib/frb_generated.dart
 
       - name: Build rustdesk
