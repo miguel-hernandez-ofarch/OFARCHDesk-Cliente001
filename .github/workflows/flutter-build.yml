@@ -703,82 +703,89 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # 0) deps Dart/Flutter
           flutter pub get
 
-          # 1) Encontrar un archivo Rust de entrada (evitar Android)
+          # 1) Elegir un archivo Rust para desktop (evitamos Android)
           RUST_INPUT="$(git -C .. ls-files \
             'src/**/macos/**/ffi*.rs' \
             'libs/**/src/**/macos/**/ffi*.rs' \
-            'src/**/macos/**/bridge*.rs' \
-            'libs/**/src/**/macos/**/bridge*.rs' \
-            'src/**/ffi*.rs' \
-            'libs/**/src/**/ffi*.rs' \
+            'src/**/quartz/**/ffi*.rs' \
+            'libs/**/src/**/quartz/**/ffi*.rs' \
             'src/**/bridge*.rs' \
             'libs/**/src/**/bridge*.rs' \
+            'src/**/ffi*.rs' \
+            'libs/**/src/**/ffi*.rs' \
             | grep -v '/android/' | head -n 1 || true)"
-          if [ -z "${RUST_INPUT}" ]; then
-            echo "No se encontró archivo Rust de entrada para FRB (no Android)." >&2
-            exit 1
-          fi
-          echo "RUST_INPUT=${RUST_INPUT}"
+          test -n "$RUST_INPUT" || { echo "No se encontró archivo Rust de entrada FRB (no Android)"; exit 1; }
+          echo "RUST_INPUT=$RUST_INPUT"
 
-          # 2) Resolver CRATE_DIR (subir hasta encontrar Cargo.toml)
-          ABS="../${RUST_INPUT}"
-          CRATE_DIR="$(cd "$(dirname "${ABS}")" && pwd)"
-          while [ ! -f "${CRATE_DIR}/Cargo.toml" ]; do
-            NEW="$(dirname "${CRATE_DIR}")"
-            if [ "${NEW}" = "${CRATE_DIR}" ]; then
-              echo "No se encontró Cargo.toml para ${RUST_INPUT}" >&2
-              exit 2
-            fi
-            CRATE_DIR="${NEW}"
-          done
-          echo "CRATE_DIR=${CRATE_DIR}"
+          # 2) Convertir a ruta ABSOLUTA respecto a la raíz del repo (.. de ./flutter)
+          ABS="$(cd .. && python3 - <<'PY' "$RUST_INPUT"
+          import os,sys
+          print(os.path.abspath(sys.argv[1]))
+          PY
+          )"
+              echo "ABS=$ABS"
 
-          # 3) Calcular módulo crate::<...> a partir del path bajo src/
-          if [[ "${ABS}" != ${CRATE_DIR}/src/* ]]; then
-            echo "El archivo ${ABS} no está bajo ${CRATE_DIR}/src; ajusta la búsqueda." >&2
-            exit 3
-          fi
-          REL="${ABS#${CRATE_DIR}/src/}"              # ej: quartz/ffi.rs
-          BASE="$(basename "${REL}")"                 # ej: ffi.rs
-          STEM="${BASE%.rs}"                          # ej: ffi
-          DIR="$(dirname "${REL}")"                   # ej: quartz
-          if [ "${BASE}" = "lib.rs" ]; then
+          # 3) Hallar el directorio del crate caminando hacia arriba hasta Cargo.toml
+          CRATE_DIR="$(python3 - <<'PY' "$ABS"
+          import os,sys
+          p=os.path.dirname(sys.argv[1])
+          while True:
+          if os.path.exists(os.path.join(p,"Cargo.toml")):
+              print(p); break
+          np=os.path.dirname(p)
+          if np==p: raise SystemExit(1)
+          p=np
+          PY
+          )"
+              echo "CRATE_DIR=$CRATE_DIR"
+
+          # 4) Verificar que ABS esté bajo CRATE_DIR/src y obtener ruta relativa a src/
+          REL="$(python3 - <<'PY' "$ABS" "$CRATE_DIR"
+          import os,sys
+          abs_path=sys.argv[1]
+          src_root=os.path.join(sys.argv[2],'src')
+          if not abs_path.startswith(src_root+os.sep):
+          print('NOT_UNDER_SRC'); raise SystemExit(0)
+          print(os.path.relpath(abs_path, src_root))
+          PY
+          )"
+              if [ "$REL" = "NOT_UNDER_SRC" ]; then
+                echo "El archivo $ABS no está bajo $CRATE_DIR/src; ajusta patrones o fija RUST_INPUT manualmente." >&2
+                exit 3
+              fi
+              echo "REL=$REL"
+
+          # 5) Derivar el módulo crate::... según FRB v2 (lib.rs / mod.rs / foo.rs)
+          BASE="$(basename "$REL")"
+          STEM="${BASE%.rs}"
+          DIR="$(dirname "$REL")"
+
+          if [ "$BASE" = "lib.rs" ]; then
             MOD="crate"
-          elif [ "${BASE}" = "mod.rs" ]; then
-            MOD="crate::$(echo "${DIR}" | tr '/' '::')"
+          elif [ "$BASE" = "mod.rs" ]; then
+            if [ "$DIR" = "." ]; then MOD="crate"; else MOD="crate::${DIR//\//::}"; fi
           else
-            if [ "${DIR}" = "." ]; then
+            if [ "$DIR" = "." ]; then
               MOD="crate::${STEM}"
             else
-              MOD="crate::$(echo "${DIR}" | tr '/' '::')::${STEM}"
+              MOD="crate::${DIR//\//::}::${STEM}"
             fi
           fi
-          # Normaliza 'crate::' duplicados
-          MOD="$(echo "${MOD}" | sed -E 's/::+/:/g;s/:+/:/g;s/::/::/g')"
-          echo "RUST MODULE=${MOD}"
+          echo "RUST MODULE=$MOD"
 
-          # 4) Instalar y ejecutar FRB v2 (sintaxis nueva con 'generate')
+          # 6) Ejecutar FRB v2 con la sintaxis nueva (generate + --rust-root + -r crate::...)
           cargo install flutter_rust_bridge_codegen --locked || true
-          if command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
-            flutter_rust_bridge_codegen generate \
-              -r "${MOD}" \
-              --rust-root "${CRATE_DIR}" \
-              -d "lib" \
-              --rust-output "${CRATE_DIR}/src/frb_generated.rs" \
-              --no-web
-          else
-            dart pub global activate flutter_rust_bridge_codegen
-            dart pub global run flutter_rust_bridge_codegen generate \
-              -r "${MOD}" \
-              --rust-root "${CRATE_DIR}" \
-              -d "lib" \
-              --rust-output "${CRATE_DIR}/src/frb_generated.rs" \
-              --no-web
-          fi
+          flutter_rust_bridge_codegen generate \
+            -r "$MOD" \
+            --rust-root "$CRATE_DIR" \
+            -d "lib" \
+            --rust-output "$CRATE_DIR/src/frb_generated.rs" \
+            --no-web
 
-          # 5) Verificación
+          # 7) Debe existir el archivo que el shim reexporta
           test -f lib/frb_generated.dart
 
       - name: Build rustdesk
