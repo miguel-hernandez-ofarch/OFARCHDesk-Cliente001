@@ -691,6 +691,36 @@ jobs:
           cargo -V
           rustc -V
 
+      - name: Create generated_bridge shim
+        if: runner.os == 'macOS'
+        run: |
+          mkdir -p flutter/lib
+          echo "export 'frb_generated.dart';" > flutter/lib/generated_bridge.dart
+
+      - name: Generate Flutter Rust Bridge files
+        if: runner.os == 'macOS'
+        working-directory: ./flutter
+        run: |
+          set -euxo pipefail
+          flutter pub get
+          RUST_INPUT="$(git -C .. ls-files '**/*flutter_ffi*.rs' '**/*ffi*.rs' '**/*bridge*.rs' | head -n 1 || true)"
+          if [ -z "$RUST_INPUT" ]; then
+            echo "No se encontró archivo Rust para FRB (*ffi*.rs o *bridge*.rs). Ajusta RUST_INPUT." >&2
+            exit 1
+          fi
+          if grep -qi "flutter_rust_bridge" pubspec.* 2>/dev/null; then
+            dart run flutter_rust_bridge:frb_codegen \
+              --rust-input "../$RUST_INPUT" \
+              --dart-output "lib" \
+              --rust-output "../src/frb_generated.rs"
+          else
+            dart pub global activate flutter_rust_bridge_codegen
+            dart pub global run flutter_rust_bridge_codegen \
+              --rust-input "../$RUST_INPUT" \
+              --dart-output "lib" \
+              --rust-output "../src/frb_generated.rs"
+          fi
+
       - name: Build rustdesk
         run: |
           if [ "${{ matrix.job.target }}" = "aarch64-apple-darwin" ]; then
