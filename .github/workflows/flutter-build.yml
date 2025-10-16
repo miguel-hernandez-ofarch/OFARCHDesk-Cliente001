@@ -659,6 +659,28 @@ jobs:
           name: bridge-artifact
           path: ./
 
+      - name: Verify bridge files are in place
+        run: |
+          set -euxo pipefail
+          # 1) ¿Llegaron directo a la raíz?
+          if [ -f flutter/lib/generated_bridge.dart ]; then
+            echo "generated_bridge.dart OK en flutter/lib"
+          # 2) ¿Quedaron dentro de una carpeta bridge-artifact/?
+          elif [ -f bridge-artifact/flutter/lib/generated_bridge.dart ]; then
+            echo "Moviendo bridge-artifact/* a la raíz del repo"
+            rsync -a bridge-artifact/ .
+          else
+            echo "No se encontró flutter/lib/generated_bridge.dart en el workspace" >&2
+            find . -maxdepth 3 -type f -name "generated_bridge.dart" || true
+            exit 1
+          fi
+
+          # 3) Sanidad: que no sea la versión Web
+          if grep -Eq "dart:js|package:js" flutter/lib/generated_bridge.dart; then
+            echo "Cuidado: generated_bridge.dart parece ser de Web" >&2
+            exit 1
+          fi
+
       - name: Setup vcpkg with Github Actions binary cache
         uses: lukka/run-vcpkg@v11
         with:
