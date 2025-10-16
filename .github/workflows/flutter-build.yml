@@ -697,15 +697,15 @@ jobs:
           mkdir -p flutter/lib
           echo "export 'frb_generated.dart';" > flutter/lib/generated_bridge.dart
 
-      - name: Generate Flutter Rust Bridge files
+      - name: Generate Flutter Rust Bridge files (FRB v2, auto-crate & module)
         if: runner.os == 'macOS'
         working-directory: ./flutter
+        shell: bash
         run: |
-          set -euxo pipefail
-          # deps de Dart/Flutter
+          set -euo pipefail
           flutter pub get
 
-          # Elegir archivo Rust para desktop, evitando Android
+          # 1) Encontrar un archivo Rust de entrada (evitar Android)
           RUST_INPUT="$(git -C .. ls-files \
             'src/**/macos/**/ffi*.rs' \
             'libs/**/src/**/macos/**/ffi*.rs' \
@@ -716,31 +716,69 @@ jobs:
             'src/**/bridge*.rs' \
             'libs/**/src/**/bridge*.rs' \
             | grep -v '/android/' | head -n 1 || true)"
-          if [ -z "$RUST_INPUT" ]; then
-            echo "No se encontró archivo Rust de entrada para FRB (no Android)" >&2
+          if [ -z "${RUST_INPUT}" ]; then
+            echo "No se encontró archivo Rust de entrada para FRB (no Android)." >&2
             exit 1
           fi
-          echo "Usando RUST_INPUT=$RUST_INPUT"
+          echo "RUST_INPUT=${RUST_INPUT}"
 
-          # Instala la CLI de FRB (preferible vía cargo), y usa 'generate'
+          # 2) Resolver CRATE_DIR (subir hasta encontrar Cargo.toml)
+          ABS="../${RUST_INPUT}"
+          CRATE_DIR="$(cd "$(dirname "${ABS}")" && pwd)"
+          while [ ! -f "${CRATE_DIR}/Cargo.toml" ]; do
+            NEW="$(dirname "${CRATE_DIR}")"
+            if [ "${NEW}" = "${CRATE_DIR}" ]; then
+              echo "No se encontró Cargo.toml para ${RUST_INPUT}" >&2
+              exit 2
+            fi
+            CRATE_DIR="${NEW}"
+          done
+          echo "CRATE_DIR=${CRATE_DIR}"
+
+          # 3) Calcular módulo crate::<...> a partir del path bajo src/
+          if [[ "${ABS}" != ${CRATE_DIR}/src/* ]]; then
+            echo "El archivo ${ABS} no está bajo ${CRATE_DIR}/src; ajusta la búsqueda." >&2
+            exit 3
+          fi
+          REL="${ABS#${CRATE_DIR}/src/}"              # ej: quartz/ffi.rs
+          BASE="$(basename "${REL}")"                 # ej: ffi.rs
+          STEM="${BASE%.rs}"                          # ej: ffi
+          DIR="$(dirname "${REL}")"                   # ej: quartz
+          if [ "${BASE}" = "lib.rs" ]; then
+            MOD="crate"
+          elif [ "${BASE}" = "mod.rs" ]; then
+            MOD="crate::$(echo "${DIR}" | tr '/' '::')"
+          else
+            if [ "${DIR}" = "." ]; then
+              MOD="crate::${STEM}"
+            else
+              MOD="crate::$(echo "${DIR}" | tr '/' '::')::${STEM}"
+            fi
+          fi
+          # Normaliza 'crate::' duplicados
+          MOD="$(echo "${MOD}" | sed -E 's/::+/:/g;s/:+/:/g;s/::/::/g')"
+          echo "RUST MODULE=${MOD}"
+
+          # 4) Instalar y ejecutar FRB v2 (sintaxis nueva con 'generate')
           cargo install flutter_rust_bridge_codegen --locked || true
           if command -v flutter_rust_bridge_codegen >/dev/null 2>&1; then
             flutter_rust_bridge_codegen generate \
-              -r "../$RUST_INPUT" \
+              -r "${MOD}" \
+              --rust-root "${CRATE_DIR}" \
               -d "lib" \
-              --rust-output "../src/frb_generated.rs" \
+              --rust-output "${CRATE_DIR}/src/frb_generated.rs" \
               --no-web
           else
-            # Fallback por si no quedó en PATH (opcional)
             dart pub global activate flutter_rust_bridge_codegen
             dart pub global run flutter_rust_bridge_codegen generate \
-              -r "../$RUST_INPUT" \
+              -r "${MOD}" \
+              --rust-root "${CRATE_DIR}" \
               -d "lib" \
-              --rust-output "../src/frb_generated.rs" \
+              --rust-output "${CRATE_DIR}/src/frb_generated.rs" \
               --no-web
           fi
 
-          # Verificación: el generador escribe lib/frb_generated.dart
+          # 5) Verificación
           test -f lib/frb_generated.dart
 
       - name: Build rustdesk
