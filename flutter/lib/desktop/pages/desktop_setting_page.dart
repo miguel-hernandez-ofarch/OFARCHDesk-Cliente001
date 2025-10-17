@@ -1113,7 +1113,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                         Radio(
                             value: value,
                             groupValue: model.temporaryPasswordLength,
-                            onChanged: toSyncString(onChanged)),
+                            onChanged: onChanged),
                         Text(
                           value,
                           style: TextStyle(
@@ -1857,7 +1857,7 @@ class _DisplayState extends State<_Display> {
             value: d[0] as String,
             groupValue: groupValue,
             label: d[1] as String,
-            onChanged: toSyncString(onChanged));
+            onChanged: onChanged);
       }).toList(),
     );
   }
